@@ -2,16 +2,13 @@
 import { AppData, Product, Resident, Transaction, Prescription, MedicalAppointment, Demand, Professional, Employee, TimeSheetEntry, TechnicalSession, EvolutionRecord, ResidentDocument, Pharmacy, StaffDocument, HouseDocument, FinancialRecord } from "../types";
 import { INITIAL_DATA as CONST_INITIAL_DATA, INITIAL_EMPLOYEE_ROLES } from "../constants";
 import { db } from "./firebase";
-import { doc, setDoc, onSnapshot, getDoc } from "firebase/firestore";
+import { doc, setDoc, onSnapshot } from "firebase/firestore";
 
 // Extendendo INITIAL_DATA do constants para incluir o novo campo vazio
 const INITIAL_DATA_EXTENDED = {
   ...CONST_INITIAL_DATA,
   houseDocuments: []
 };
-
-const STORAGE_KEY = 'careflow_db_v1';
-const SNAPSHOT_KEY = 'careflow_db_snapshot';
 
 // --- SAFE ID GENERATOR (Critical for Data Persistence) ---
 const generateSafeId = () => {
@@ -236,66 +233,6 @@ const migrateAndCleanData = (parsed: any): AppData => {
     };
 };
 
-const parseAndMigrate = (jsonString: string): AppData | null => {
-  try {
-    const parsed = JSON.parse(jsonString);
-    if (!parsed || typeof parsed !== 'object') return null;
-    return migrateAndCleanData(parsed);
-  } catch (e) {
-    console.error("Erro ao migrar dados:", e);
-    return null;
-  }
-};
-
-// --- LOCAL STORAGE FUNCTIONS (Legacy & Offline) ---
-
-export const loadData = (): AppData => {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    const snapshot = localStorage.getItem(SNAPSHOT_KEY);
-
-    if (stored) {
-      const data = parseAndMigrate(stored);
-      if (data) {
-        // Tenta atualizar o snapshot
-        try { localStorage.setItem(SNAPSHOT_KEY, stored); } catch(e) {}
-        return data;
-      }
-    }
-
-    if (snapshot) {
-      const data = parseAndMigrate(snapshot);
-      if (data) return data;
-    }
-    
-    return INITIAL_DATA_EXTENDED as AppData;
-
-  } catch (e) {
-    console.error("ERRO CRÍTICO DE CARREGAMENTO LOCAL:", e);
-    return INITIAL_DATA_EXTENDED as AppData;
-  }
-};
-
-export const saveData = (data: AppData) => {
-  try {
-    const stringified = JSON.stringify(data);
-    try {
-      localStorage.setItem(STORAGE_KEY, stringified);
-    } catch (e: any) {
-      if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
-        localStorage.removeItem(SNAPSHOT_KEY);
-        try {
-          localStorage.setItem(STORAGE_KEY, stringified);
-        } catch (innerError) {
-          console.error("Storage full, could not save locally.");
-        }
-      }
-    }
-  } catch (e) {
-    console.error("Falha ao salvar dados localmente", e);
-  }
-};
-
 export const exportData = (data: AppData) => {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -331,9 +268,7 @@ export const subscribeToUserData = (uid: string, onData: (data: AppData) => void
       onData(cleanData);
     } else {
       // Se não existir documento para este usuário (primeiro login),
-      // cria com dados iniciais ou dados locais se existirem?
-      // Estratégia: Se não existe remoto, cria com INITIAL_DATA_EXTENDED
-      // (Podemos melhorar importando local se quiser, mas start limpo é mais seguro)
+      // cria com dados iniciais.
       console.log("Novo usuário detectado. Criando banco de dados...");
       await setDoc(doc(db, "users", uid), INITIAL_DATA_EXTENDED);
       onData(INITIAL_DATA_EXTENDED as AppData);

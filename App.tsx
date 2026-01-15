@@ -16,8 +16,8 @@ import { Evolutions } from './components/Evolutions';
 import { AdminPanel } from './components/AdminPanel';
 import { Login } from './components/Login';
 import { AppData, Product, Resident, Transaction, ViewName, Prescription, MedicalAppointment, Demand, Professional, Employee, TimeSheetEntry, TechnicalSession, EvolutionRecord, HouseDocument } from './types';
-import { loadData, saveData, saveRemoteData, subscribeToUserData, exportData } from './services/storage';
-import { Database, Upload, Download, RefreshCw, Trash2, HeartHandshake, CloudOff, Cloud } from 'lucide-react';
+import { saveRemoteData, subscribeToUserData, exportData } from './services/storage';
+import { Database, Upload, Download, RefreshCw, Trash2, HeartHandshake, CloudOff, Cloud, AlertTriangle } from 'lucide-react';
 import { auth } from './services/firebase';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { INITIAL_DATA } from './constants';
@@ -42,7 +42,9 @@ const App: React.FC = () => {
   const [data, setData] = useState<AppData>(INITIAL_DATA as AppData);
   const [isDataLoaded, setIsDataLoaded] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [isOfflineMode, setIsOfflineMode] = useState(false);
+  
+  // Error state instead of offline mode
+  const [syncError, setSyncError] = useState<string | null>(null);
 
   // Ref to unsubscribe from Firestore listener
   const unsubscribeRef = useRef<() => void>();
@@ -52,17 +54,15 @@ const App: React.FC = () => {
       setUser(currentUser);
       setAuthLoading(false);
       
-      // Se deslogar, limpa listener e volta para dados locais (ou limpa)
+      // Se deslogar, limpa listener e reseta dados
       if (!currentUser) {
         if (unsubscribeRef.current) {
           unsubscribeRef.current();
           unsubscribeRef.current = undefined;
         }
-        // Carrega dados locais (fallback/offline mode se desejado)
-        const localData = loadData();
-        setData(localData);
+        setData(INITIAL_DATA as AppData);
         setIsDataLoaded(true);
-        setIsOfflineMode(false);
+        setSyncError(null);
       }
     });
 
@@ -76,7 +76,7 @@ const App: React.FC = () => {
   useEffect(() => {
     if (user) {
       setIsDataLoaded(false);
-      setIsOfflineMode(false);
+      setSyncError(null);
       console.log("Conectando ao banco de dados remoto...");
       
       unsubscribeRef.current = subscribeToUserData(
@@ -84,45 +84,37 @@ const App: React.FC = () => {
         (remoteData) => {
           setData(remoteData);
           setIsDataLoaded(true);
-          setIsOfflineMode(false);
+          setSyncError(null);
         },
         (error) => {
-          // Erro de permissão ou rede: Fallback para local
-          console.warn("Falha na conexão remota. Usando dados locais.", error);
-          const localData = loadData();
-          setData(localData);
-          setIsDataLoaded(true);
-          setIsOfflineMode(true);
+          console.error("Erro no Firestore:", error);
+          setSyncError("Não foi possível carregar os dados. Verifique sua conexão ou permissões.");
+          setIsDataLoaded(true); // Stop loading spinner to show error
         }
       );
     }
   }, [user]);
 
-  // Effect to Save Data (Debounced or Immediate)
-  // Como as atualizações locais são instantâneas na UI, salvamos no Firestore quando 'data' muda.
+  // Effect to Save Data (Debounced)
   useEffect(() => {
-    if (!isDataLoaded) return; // Não salva se ainda estiver carregando a primeira vez
+    if (!isDataLoaded) return; 
+    if (!user) return;
+    if (syncError) return; // Don't try to save if there's a sync error
 
-    // Salva localmente sempre como backup
-    saveData(data);
+    setIsSaving(true);
+    // Pequeno debounce para evitar writes excessivos em digitação rápida
+    const timeoutId = setTimeout(() => {
+      saveRemoteData(user.uid, data)
+        .then(() => setIsSaving(false))
+        .catch((err) => {
+          console.error("Erro ao salvar nuvem:", err);
+          setIsSaving(false);
+          // Optional: Set a temporary saving error state
+        });
+    }, 1000); // 1 segundo de debounce
 
-    if (user && !isOfflineMode) {
-      setIsSaving(true);
-      // Pequeno debounce para evitar writes excessivos em digitação rápida
-      const timeoutId = setTimeout(() => {
-        saveRemoteData(user.uid, data)
-          .then(() => setIsSaving(false))
-          .catch((err) => {
-            console.error("Erro ao salvar nuvem:", err);
-            setIsSaving(false);
-            // Se falhar ao salvar, talvez devêssemos avisar ou mudar para offline, 
-            // mas erros de escrita temporários são comuns.
-          });
-      }, 1000); // 1 segundo de debounce
-
-      return () => clearTimeout(timeoutId);
-    }
-  }, [data, user, isDataLoaded, isOfflineMode]);
+    return () => clearTimeout(timeoutId);
+  }, [data, user, isDataLoaded, syncError]);
 
   const handleLogout = async () => {
     try {
@@ -429,9 +421,8 @@ const App: React.FC = () => {
 
         if (Array.isArray(json.residents) && Array.isArray(json.products)) {
           if(window.confirm("ATENÇÃO: Restaurar este backup substituirá COMPLETAMENTE os dados atuais.\n\nEssa ação não pode ser desfeita. Deseja continuar?")) {
-             // Atualiza estado (o useEffect salvará no Firestore automaticamente)
-             setData(json);
-             alert("Backup restaurado com sucesso!");
+             setData(json); // Sync will happen in useEffect
+             alert("Dados carregados! A sincronização com o banco de dados iniciará em instantes.");
           }
         } else {
           alert("Arquivo inválido. A estrutura do arquivo não corresponde a um backup do LifeCare.");
@@ -448,12 +439,7 @@ const App: React.FC = () => {
   const handleFactoryReset = () => {
     const confirmText = prompt("PERIGO: Isso apagará TODOS os dados cadastrados (residentes, estoque, histórico) e restaurará o estado inicial do aplicativo.\n\nDigite 'RESETAR' para confirmar:");
     if (confirmText === 'RESETAR') {
-      localStorage.removeItem('careflow_db_v1');
-      localStorage.removeItem('careflow_db_snapshot');
-      
-      // Reseta estado (o useEffect salvará no Firestore)
-      setData(INITIAL_DATA as AppData);
-      
+      setData(INITIAL_DATA as AppData); // Sync will happen in useEffect
       alert("Sistema restaurado para o padrão de fábrica.");
     }
   };
@@ -625,11 +611,27 @@ const App: React.FC = () => {
     return <Login />;
   }
 
-  if (!isDataLoaded) {
+  if (!isDataLoaded && !syncError) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 text-slate-500">
         <RefreshCw size={48} className="mb-4 animate-spin text-primary-500" />
-        <p className="font-medium text-lg">Sincronizando dados...</p>
+        <p className="font-medium text-lg">Sincronizando dados com a nuvem...</p>
+      </div>
+    );
+  }
+
+  if (syncError) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-red-50 text-red-600 p-6 text-center">
+        <AlertTriangle size={64} className="mb-4" />
+        <h2 className="text-2xl font-bold mb-2">Erro de Sincronização</h2>
+        <p className="mb-6 max-w-md">{syncError}</p>
+        <button 
+          onClick={() => window.location.reload()}
+          className="bg-red-600 text-white px-6 py-3 rounded-lg font-bold hover:bg-red-700 shadow-lg"
+        >
+          Tentar Novamente
+        </button>
       </div>
     );
   }
@@ -638,17 +640,13 @@ const App: React.FC = () => {
     <Layout currentView={view} onNavigate={setView} onLogout={handleLogout}>
       {/* Cloud Status Indicator */}
       <div className="fixed bottom-4 right-4 z-50">
-        {isOfflineMode ? (
-          <div className="bg-amber-100 border border-amber-300 shadow-lg rounded-full px-3 py-1.5 flex items-center gap-2 text-xs font-bold text-amber-700 animate-pulse">
-            <CloudOff size={12} /> Modo Offline (Local)
-          </div>
-        ) : isSaving ? (
+        {isSaving ? (
           <div className="bg-white border border-slate-200 shadow-lg rounded-full px-3 py-1.5 flex items-center gap-2 text-xs font-bold text-slate-500 animate-pulse">
             <RefreshCw size={12} className="animate-spin"/> Salvando...
           </div>
         ) : (
-          <div className="bg-white border border-slate-200 shadow-md rounded-full px-3 py-1.5 flex items-center gap-2 text-xs font-bold text-green-600 opacity-80 hover:opacity-100 transition-opacity" title="Dados sincronizados">
-            <Cloud size={12} /> Salvo
+          <div className="bg-white border border-slate-200 shadow-md rounded-full px-3 py-1.5 flex items-center gap-2 text-xs font-bold text-green-600 opacity-80 hover:opacity-100 transition-opacity" title="Dados sincronizados com Firestore">
+            <Cloud size={12} /> Salvo (Nuvem)
           </div>
         )}
       </div>
