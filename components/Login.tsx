@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import { auth } from '../services/firebase';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, AuthError } from 'firebase/auth';
@@ -49,10 +50,10 @@ export const Login: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col lg:flex-row">
+    <div className="h-full w-full overflow-y-auto bg-slate-50 flex flex-col lg:flex-row">
       
       {/* Presentation Side (Left) */}
-      <div className="lg:w-1/2 bg-gradient-to-br from-primary-600 to-blue-800 text-white p-8 lg:p-16 flex flex-col justify-between relative overflow-hidden">
+      <div className="lg:w-1/2 bg-gradient-to-br from-primary-600 to-blue-800 text-white p-8 lg:p-16 flex flex-col justify-between relative overflow-hidden min-h-[500px] lg:min-h-auto shrink-0">
         {/* Background Patterns */}
         <div className="absolute top-0 left-0 w-full h-full opacity-10 pointer-events-none">
            <div className="absolute top-10 left-10 w-64 h-64 rounded-full bg-white blur-3xl"></div>
@@ -111,7 +112,7 @@ export const Login: React.FC = () => {
       </div>
 
       {/* Login Side (Right) */}
-      <div className="lg:w-1/2 flex items-center justify-center p-6 lg:p-12">
+      <div className="lg:w-1/2 flex items-center justify-center p-6 lg:p-12 shrink-0">
         <div className="max-w-md w-full bg-white rounded-2xl shadow-xl lg:shadow-none border border-slate-100 lg:border-none p-8 lg:p-0">
           
           <div className="mb-8 text-center lg:text-left">

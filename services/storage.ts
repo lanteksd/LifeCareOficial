@@ -1,6 +1,8 @@
 
 import { AppData, Product, Resident, Transaction, Prescription, MedicalAppointment, Demand, Professional, Employee, TimeSheetEntry, TechnicalSession, EvolutionRecord, ResidentDocument, Pharmacy, StaffDocument, HouseDocument, FinancialRecord } from "../types";
 import { INITIAL_DATA as CONST_INITIAL_DATA, INITIAL_EMPLOYEE_ROLES } from "../constants";
+import { db } from "./firebase";
+import { doc, setDoc, onSnapshot, getDoc } from "firebase/firestore";
 
 // Extendendo INITIAL_DATA do constants para incluir o novo campo vazio
 const INITIAL_DATA_EXTENDED = {
@@ -215,11 +217,7 @@ const migrateEvolution = (ev: any): EvolutionRecord => ({
 
 
 // Helper central para processar o JSON cru e transformá-lo em AppData seguro
-const parseAndMigrate = (jsonString: string): AppData | null => {
-  try {
-    const parsed = JSON.parse(jsonString);
-    if (!parsed || typeof parsed !== 'object') return null;
-
+const migrateAndCleanData = (parsed: any): AppData => {
     // Se o usuário já usou o app, respeitamos os arrays dele, mesmo que vazios.
     return {
       residents: Array.isArray(parsed.residents) ? parsed.residents.map(migrateResident) : [],
@@ -236,43 +234,44 @@ const parseAndMigrate = (jsonString: string): AppData | null => {
       evolutions: Array.isArray(parsed.evolutions) ? parsed.evolutions.map(migrateEvolution) : [],
       houseDocuments: Array.isArray(parsed.houseDocuments) ? parsed.houseDocuments.map(migrateHouseDocument) : [],
     };
+};
+
+const parseAndMigrate = (jsonString: string): AppData | null => {
+  try {
+    const parsed = JSON.parse(jsonString);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return migrateAndCleanData(parsed);
   } catch (e) {
     console.error("Erro ao migrar dados:", e);
     return null;
   }
 };
 
+// --- LOCAL STORAGE FUNCTIONS (Legacy & Offline) ---
+
 export const loadData = (): AppData => {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     const snapshot = localStorage.getItem(SNAPSHOT_KEY);
 
-    // TENTATIVA 1: Carregar dados principais
     if (stored) {
       const data = parseAndMigrate(stored);
       if (data) {
-        console.log("Dados carregados com sucesso do armazenamento local.");
-        // Tenta atualizar o snapshot se possível, mas sem bloquear se falhar
+        // Tenta atualizar o snapshot
         try { localStorage.setItem(SNAPSHOT_KEY, stored); } catch(e) {}
         return data;
-      } else {
-        console.warn("Dados encontrados mas falharam na migração. Tentando snapshot.");
       }
     }
 
-    // TENTATIVA 2: Carregar snapshot (se o principal falhou/corrompeu)
     if (snapshot) {
-      console.warn("Recuperando do Snapshot de segurança.");
       const data = parseAndMigrate(snapshot);
       if (data) return data;
     }
     
-    // TENTATIVA 3: Primeiro acesso (Padrão de Fábrica)
-    console.log("Nenhum dado anterior válido encontrado. Inicializando novo banco de dados.");
     return INITIAL_DATA_EXTENDED as AppData;
 
   } catch (e) {
-    console.error("ERRO CRÍTICO DE CARREGAMENTO:", e);
+    console.error("ERRO CRÍTICO DE CARREGAMENTO LOCAL:", e);
     return INITIAL_DATA_EXTENDED as AppData;
   }
 };
@@ -280,38 +279,20 @@ export const loadData = (): AppData => {
 export const saveData = (data: AppData) => {
   try {
     const stringified = JSON.stringify(data);
-    
-    // TENTATIVA 1: Salvar dados principais
     try {
       localStorage.setItem(STORAGE_KEY, stringified);
     } catch (e: any) {
-      // Se deu erro de cota, tenta limpar o snapshot para liberar espaço
       if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
-        console.warn("Cota de armazenamento cheia. Removendo snapshot para liberar espaço.");
         localStorage.removeItem(SNAPSHOT_KEY);
-        
-        // Tenta salvar novamente após limpar
         try {
           localStorage.setItem(STORAGE_KEY, stringified);
         } catch (innerError) {
-          // Se ainda assim falhar, avisa o usuário
-          alert("ATENÇÃO: Armazenamento do navegador cheio! \n\nNão foi possível salvar as últimas alterações. \n\nRecomendação: \n1. Vá em Configurações > Baixar Backup. \n2. Remova fotos antigas ou dados desnecessários.");
-          throw innerError;
+          console.error("Storage full, could not save locally.");
         }
-      } else {
-        throw e;
       }
     }
-
-    // TENTATIVA 2: Atualizar snapshot (apenas se houver espaço)
-    try {
-      localStorage.setItem(SNAPSHOT_KEY, stringified);
-    } catch (e) {
-      console.warn("Espaço insuficiente para criar snapshot de segurança (operação não crítica).");
-    }
-
   } catch (e) {
-    console.error("Falha fatal ao salvar dados", e);
+    console.error("Falha ao salvar dados localmente", e);
   }
 };
 
@@ -325,4 +306,40 @@ export const exportData = (data: AppData) => {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+};
+
+// --- FIRESTORE FUNCTIONS (Cloud Sync) ---
+
+export const saveRemoteData = async (uid: string, data: AppData) => {
+  try {
+    // Salva o objeto inteiro do AppData em um único documento
+    // users/{uid}
+    await setDoc(doc(db, "users", uid), data);
+  } catch (e) {
+    console.error("Erro ao salvar no Firestore:", e);
+    throw e; // Propagate error for UI handling if needed
+  }
+};
+
+export const subscribeToUserData = (uid: string, onData: (data: AppData) => void, onError?: (error: any) => void) => {
+  // Escuta mudanças em tempo real no documento do usuário
+  return onSnapshot(doc(db, "users", uid), async (docSnap) => {
+    if (docSnap.exists()) {
+      const rawData = docSnap.data();
+      // Aplica migração para garantir que novos campos existam
+      const cleanData = migrateAndCleanData(rawData);
+      onData(cleanData);
+    } else {
+      // Se não existir documento para este usuário (primeiro login),
+      // cria com dados iniciais ou dados locais se existirem?
+      // Estratégia: Se não existe remoto, cria com INITIAL_DATA_EXTENDED
+      // (Podemos melhorar importando local se quiser, mas start limpo é mais seguro)
+      console.log("Novo usuário detectado. Criando banco de dados...");
+      await setDoc(doc(db, "users", uid), INITIAL_DATA_EXTENDED);
+      onData(INITIAL_DATA_EXTENDED as AppData);
+    }
+  }, (error) => {
+    console.error("Erro na subscrição do Firestore:", error);
+    if (onError) onError(error);
+  });
 };
